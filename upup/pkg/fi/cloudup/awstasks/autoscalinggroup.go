@@ -185,9 +185,15 @@ func (s *AutoscalingGroup) CheckChanges(a, e, changes *AutoscalingGroup) error {
 
 func (e *AutoscalingGroup) buildTags(cloud fi.Cloud) map[string]string {
 	tags := make(map[string]string)
-	for k, v := range e.Tags {
-		tags[k] = v
-	}
+    for k, v := range e.Tags {
+        if val, ok := e.Tags["master_prefix"]; ok && k == "Name" && strings.HasPrefix(v, "master") {
+                tags["Name"] = val + "-" + v
+        } else if val, ok := e.Tags["node_prefix"]; ok && k == "Name" && strings.HasPrefix(v, "node") {
+                tags["Name"] = val + "-" + v
+        } else {
+                tags[k] = v
+        }
+    }
 	return tags
 }
 
