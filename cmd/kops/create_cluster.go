@@ -33,6 +33,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kops"
 	"k8s.io/kops/cmd/kops/util"
 	api "k8s.io/kops/pkg/apis/kops"
@@ -43,6 +44,7 @@ import (
 	"k8s.io/kops/pkg/commands"
 	"k8s.io/kops/pkg/dns"
 	"k8s.io/kops/pkg/featureflag"
+	"k8s.io/kops/pkg/model/components"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/aliup"
@@ -80,6 +82,7 @@ type CreateClusterOptions struct {
 	VPCID                string
 	SubnetIDs            []string
 	UtilitySubnetIDs     []string
+	DisableSubnetTags    bool
 	NetworkCIDR          string
 	DNSZone              string
 	AdminAccess          []string
@@ -138,6 +141,10 @@ type CreateClusterOptions struct {
 	// We need VSphereDatastore to support Kubernetes vSphere Cloud Provider (v1.5.3)
 	// We can remove this once we support higher versions.
 	VSphereDatastore string
+
+	// Spotinst options
+	SpotinstProduct     string
+	SpotinstOrientation string
 
 	// ConfigBase is the location where we will store the configuration, it defaults to the state store
 	ConfigBase string
@@ -290,6 +297,7 @@ func NewCmdCreateCluster(f *util.Factory, out io.Writer) *cobra.Command {
 	cmd.Flags().StringSliceVar(&options.SubnetIDs, "subnets", options.SubnetIDs, "Set to use shared subnets")
 	cmd.Flags().StringSliceVar(&options.UtilitySubnetIDs, "utility-subnets", options.UtilitySubnetIDs, "Set to use shared utility subnets")
 	cmd.Flags().StringVar(&options.NetworkCIDR, "network-cidr", options.NetworkCIDR, "Set to override the default network CIDR")
+	cmd.Flags().BoolVar(&options.DisableSubnetTags, "disable-subnet-tags", options.DisableSubnetTags, "Set to disable automatic subnet tagging")
 
 	cmd.Flags().Int32Var(&options.MasterCount, "master-count", options.MasterCount, "Set the number of masters.  Defaults to one master per master-zone")
 	cmd.Flags().Int32Var(&options.NodeCount, "node-count", options.NodeCount, "Set the number of nodes")
@@ -353,6 +361,13 @@ func NewCmdCreateCluster(f *util.Factory, out io.Writer) *cobra.Command {
 		cmd.Flags().StringVar(&options.VSphereCoreDNSServer, "vsphere-coredns-server", options.VSphereCoreDNSServer, "vsphere-coredns-server is required for vSphere.")
 		cmd.Flags().StringVar(&options.VSphereDatastore, "vsphere-datastore", options.VSphereDatastore, "vsphere-datastore is required for vSphere.  Set a valid datastore in which to store dynamic provision volumes.")
 	}
+
+	if featureflag.Spotinst.Enabled() {
+		// Spotinst flags
+		cmd.Flags().StringVar(&options.SpotinstProduct, "spotinst-product", options.SpotinstProduct, "Set the product description (valid values: Linux/UNIX, Linux/UNIX (Amazon VPC), Windows and Windows (Amazon VPC))")
+		cmd.Flags().StringVar(&options.SpotinstOrientation, "spotinst-orientation", options.SpotinstOrientation, "Set the prediction strategy (valid values: balanced, cost, equal-distribution and availability)")
+	}
+
 	return cmd
 }
 
@@ -485,9 +500,8 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 		if cluster.Spec.CloudProvider == "" {
 			if allZones.Len() == 0 {
 				return fmt.Errorf("must specify --zones or --cloud")
-			} else {
-				return fmt.Errorf("unable to infer CloudProvider from Zones (is there a typo in --zones?)")
 			}
+			return fmt.Errorf("unable to infer CloudProvider from Zones (is there a typo in --zones?)")
 		}
 	}
 
@@ -840,6 +854,18 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 			}
 			cluster.Spec.CloudConfig.VSphereDatastore = fi.String(c.VSphereDatastore)
 		}
+
+		if featureflag.Spotinst.Enabled() {
+			if cluster.Spec.CloudConfig == nil {
+				cluster.Spec.CloudConfig = &api.CloudConfiguration{}
+			}
+			if c.SpotinstProduct != "" {
+				cluster.Spec.CloudConfig.SpotinstProduct = fi.String(c.SpotinstProduct)
+			}
+			if c.SpotinstOrientation != "" {
+				cluster.Spec.CloudConfig.SpotinstOrientation = fi.String(c.SpotinstOrientation)
+			}
+		}
 	}
 
 	// Populate project
@@ -895,7 +921,17 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 			Backend: "udp",
 		}
 	case "calico":
-		cluster.Spec.Networking.Calico = &api.CalicoNetworkingSpec{}
+		cluster.Spec.Networking.Calico = &api.CalicoNetworkingSpec{
+			MajorVersion: "v3",
+		}
+		// Validate to check if etcd clusters have an acceptable version
+		if errList := validation.ValidateEtcdVersionForCalicoV3(cluster.Spec.EtcdClusters[0], cluster.Spec.Networking.Calico.MajorVersion, field.NewPath("Calico")); len(errList) != 0 {
+
+			// This is not a special version but simply of the 3 series
+			for _, etcd := range cluster.Spec.EtcdClusters {
+				etcd.Version = components.DefaultEtcd3Version_1_11
+			}
+		}
 	case "canal":
 		cluster.Spec.Networking.Canal = &api.CanalNetworkingSpec{}
 	case "kube-router":
@@ -922,6 +958,8 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 		glog.Infof("Empty topology. Defaulting to public topology")
 		c.Topology = api.TopologyPublic
 	}
+
+	cluster.Spec.DisableSubnetTags = c.DisableSubnetTags
 
 	switch c.Topology {
 	case api.TopologyPublic:
@@ -1058,7 +1096,7 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 		}
 	}
 
-	if c.APISSLCertificate != "" {
+	if cluster.Spec.API.LoadBalancer != nil && c.APISSLCertificate != "" {
 		cluster.Spec.API.LoadBalancer.SSLCertificate = c.APISSLCertificate
 	}
 
@@ -1345,11 +1383,9 @@ func loadSSHPublicKeys(sshPublicKey string) (map[string][]byte, error) {
 		authorized, err := ioutil.ReadFile(sshPublicKey)
 		if err != nil {
 			return nil, err
-		} else {
-			sshPublicKeys[fi.SecretNameSSHPrimary] = authorized
-
-			glog.Infof("Using SSH public key: %v\n", sshPublicKey)
 		}
+		sshPublicKeys[fi.SecretNameSSHPrimary] = authorized
+		glog.Infof("Using SSH public key: %v\n", sshPublicKey)
 	}
 	return sshPublicKeys, nil
 }

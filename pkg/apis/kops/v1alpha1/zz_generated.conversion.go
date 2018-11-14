@@ -453,6 +453,7 @@ func autoConvert_v1alpha1_CalicoNetworkingSpec_To_kops_CalicoNetworkingSpec(in *
 	out.PrometheusMetricsPort = in.PrometheusMetricsPort
 	out.PrometheusGoMetricsEnabled = in.PrometheusGoMetricsEnabled
 	out.PrometheusProcessMetricsEnabled = in.PrometheusProcessMetricsEnabled
+	out.MajorVersion = in.MajorVersion
 	return nil
 }
 
@@ -469,6 +470,7 @@ func autoConvert_kops_CalicoNetworkingSpec_To_v1alpha1_CalicoNetworkingSpec(in *
 	out.PrometheusMetricsPort = in.PrometheusMetricsPort
 	out.PrometheusGoMetricsEnabled = in.PrometheusGoMetricsEnabled
 	out.PrometheusProcessMetricsEnabled = in.PrometheusProcessMetricsEnabled
+	out.MajorVersion = in.MajorVersion
 	return nil
 }
 
@@ -656,6 +658,8 @@ func autoConvert_v1alpha1_CloudConfiguration_To_kops_CloudConfiguration(in *Clou
 	out.VSphereResourcePool = in.VSphereResourcePool
 	out.VSphereDatastore = in.VSphereDatastore
 	out.VSphereCoreDNSServer = in.VSphereCoreDNSServer
+	out.SpotinstProduct = in.SpotinstProduct
+	out.SpotinstOrientation = in.SpotinstOrientation
 	return nil
 }
 
@@ -677,6 +681,8 @@ func autoConvert_kops_CloudConfiguration_To_v1alpha1_CloudConfiguration(in *kops
 	out.VSphereResourcePool = in.VSphereResourcePool
 	out.VSphereDatastore = in.VSphereDatastore
 	out.VSphereCoreDNSServer = in.VSphereCoreDNSServer
+	out.SpotinstProduct = in.SpotinstProduct
+	out.SpotinstOrientation = in.SpotinstOrientation
 	return nil
 }
 
@@ -1062,6 +1068,7 @@ func autoConvert_v1alpha1_ClusterSpec_To_kops_ClusterSpec(in *ClusterSpec, out *
 		out.IAM = nil
 	}
 	out.EncryptionConfig = in.EncryptionConfig
+	out.DisableSubnetTags = in.DisableSubnetTags
 	if in.Target != nil {
 		in, out := &in.Target, &out.Target
 		*out = new(kops.TargetSpec)
@@ -1328,6 +1335,7 @@ func autoConvert_kops_ClusterSpec_To_v1alpha1_ClusterSpec(in *kops.ClusterSpec, 
 		out.IAM = nil
 	}
 	out.EncryptionConfig = in.EncryptionConfig
+	out.DisableSubnetTags = in.DisableSubnetTags
 	if in.Target != nil {
 		in, out := &in.Target, &out.Target
 		*out = new(TargetSpec)
@@ -2436,6 +2444,10 @@ func autoConvert_v1alpha1_KubeProxyConfig_To_kops_KubeProxyConfig(in *KubeProxyC
 	out.Master = in.Master
 	out.Enabled = in.Enabled
 	out.ProxyMode = in.ProxyMode
+	out.IPVSExcludeCIDRS = in.IPVSExcludeCIDRS
+	out.IPVSMinSyncPeriod = in.IPVSMinSyncPeriod
+	out.IPVSScheduler = in.IPVSScheduler
+	out.IPVSSyncPeriod = in.IPVSSyncPeriod
 	out.FeatureGates = in.FeatureGates
 	out.ConntrackMaxPerCore = in.ConntrackMaxPerCore
 	out.ConntrackMin = in.ConntrackMin
@@ -2460,6 +2472,10 @@ func autoConvert_kops_KubeProxyConfig_To_v1alpha1_KubeProxyConfig(in *kops.KubeP
 	out.Master = in.Master
 	out.Enabled = in.Enabled
 	out.ProxyMode = in.ProxyMode
+	out.IPVSExcludeCIDRS = in.IPVSExcludeCIDRS
+	out.IPVSMinSyncPeriod = in.IPVSMinSyncPeriod
+	out.IPVSScheduler = in.IPVSScheduler
+	out.IPVSSyncPeriod = in.IPVSSyncPeriod
 	out.FeatureGates = in.FeatureGates
 	out.ConntrackMaxPerCore = in.ConntrackMaxPerCore
 	out.ConntrackMin = in.ConntrackMin
