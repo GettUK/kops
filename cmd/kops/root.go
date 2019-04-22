@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	goflag "flag"
 	"fmt"
 	"io"
@@ -146,6 +147,7 @@ func NewCmdRoot(f *util.Factory, out io.Writer) *cobra.Command {
 	cmd.AddCommand(NewCmdSet(f, out))
 	cmd.AddCommand(NewCmdToolbox(f, out))
 	cmd.AddCommand(NewCmdValidate(f, out))
+	cmd.AddCommand(NewCmdVersion(f, out))
 
 	return cmd
 }
@@ -220,9 +222,8 @@ func (c *RootCmd) ProcessArgs(args []string) error {
 
 	if len(args) == 1 {
 		return fmt.Errorf("Cannot specify cluster via --name and positional argument")
-	} else {
-		return fmt.Errorf("expected a single <clustername> to be passed as an argument")
 	}
+	return fmt.Errorf("expected a single <clustername> to be passed as an argument")
 }
 
 func (c *RootCmd) ClusterName() string {
@@ -325,4 +326,15 @@ func GetCluster(factory Factory, clusterName string) (*kopsapi.Cluster, error) {
 		return nil, fmt.Errorf("cluster name did not match expected name: %v vs %v", clusterName, cluster.ObjectMeta.Name)
 	}
 	return cluster, nil
+}
+
+// ConsumeStdin reads all the bytes available from stdin
+func ConsumeStdin() ([]byte, error) {
+	file := os.Stdin
+	buf := new(bytes.Buffer)
+	_, err := buf.ReadFrom(file)
+	if err != nil {
+		return nil, fmt.Errorf("error reading stdin: %v", err)
+	}
+	return buf.Bytes(), nil
 }

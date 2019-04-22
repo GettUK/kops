@@ -82,9 +82,7 @@ type terraformOutputVariable struct {
 // A TF name can't have dots in it (if we want to refer to it from a literal),
 // so we replace them
 func tfSanitize(name string) string {
-	name = strings.Replace(name, ".", "-", -1)
-	name = strings.Replace(name, "/", "--", -1)
-	return name
+	return strings.NewReplacer(".", "-", "/", "--", ":", "_").Replace(name)
 }
 
 func (t *TerraformTarget) AddFile(resourceType string, resourceName string, key string, r fi.Resource) (*Literal, error) {
@@ -276,7 +274,7 @@ func (t *TerraformTarget) Finish(taskMap map[string]fi.Task) error {
 
 	jsonBytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		return fmt.Errorf("error marshalling terraform data to json: %v", err)
+		return fmt.Errorf("error marshaling terraform data to json: %v", err)
 	}
 
 	useJson := false

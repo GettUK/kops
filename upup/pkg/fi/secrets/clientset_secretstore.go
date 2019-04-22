@@ -25,7 +25,7 @@ import (
 
 	"github.com/golang/glog"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kops/pkg/acls"
 	"k8s.io/kops/pkg/apis/kops"
 	kopsinternalversion "k8s.io/kops/pkg/client/clientset_generated/clientset/typed/kops/internalversion"
@@ -194,7 +194,7 @@ func (c *ClientsetSecretStore) GetOrCreateSecret(name string, secret *fi.Secret)
 	// Make double-sure it round-trips
 	s, err := c.loadSecret(name)
 	if err != nil {
-		glog.Fatalf("unable to load secret immmediately after creation %v: %v", name, err)
+		glog.Fatalf("unable to load secret immediately after creation %v: %v", name, err)
 		return nil, false, err
 	}
 	return s, true, nil
@@ -210,7 +210,7 @@ func (c *ClientsetSecretStore) ReplaceSecret(name string, secret *fi.Secret) (*f
 	// Confirm the secret exists
 	s, err := c.loadSecret(name)
 	if err != nil {
-		return nil, fmt.Errorf("unable to load secret immmediately after creation: %v", err)
+		return nil, fmt.Errorf("unable to load secret immediately after creation: %v", err)
 	}
 	return s, nil
 }

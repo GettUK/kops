@@ -175,7 +175,7 @@ Reinitialize the etcd instances:
 * Delete the containers and the data directories:
 
 ```bash
-root@ip-172-20-116-230:~# docker stop $(docker ps | grep "gcr.io/google_containers/etcd" | awk '{print $1}')
+root@ip-172-20-116-230:~# docker stop $(docker ps | grep "k8s.gcr.io/etcd" | awk '{print $1}')
 root@ip-172-20-116-230:~# rm -r /mnt/master-vol-03b97b1249caf379a/var/etcd/data-events/member/
 root@ip-172-20-116-230:~# rm -r /mnt/master-vol-0dbfd1f3c60b8c509/var/etcd/data/member/
 ```
@@ -247,7 +247,7 @@ $ kubectl --namespace=kube-system exec etcd-server-ip-172-20-36-161.ec2.internal
  * Delete the containers and the data directories:
 
  ```bash
- root@ip-172-20-139-130:~# docker stop $(docker ps | grep "gcr.io/google_containers/etcd" | awk '{print $1}')
+ root@ip-172-20-139-130:~# docker stop $(docker ps | grep "k8s.gcr.io/etcd" | awk '{print $1}')
  root@ip-172-20-139-130:~# rm -r /mnt/master-vol-019796c3511a91b4f//var/etcd/data-events/member/
  root@ip-172-20-139-130:~# rm -r /mnt/master-vol-0c89fd6f6a256b686/var/etcd/data/member/
  ```
@@ -292,7 +292,7 @@ and not during a future upgrade or, worse, during a master failure.
 
 In case you failed to upgrade to multi-master you will need to restore from the backup you have taken previously.
 
-Take extra care becase kops will not start etcd and etcd-events with the same ID on <master-b> an/or <master-c> for example but will mix them (ex: etcd-b and etcd-events-c on <master-b> & etcd-c and etcd-events-b on <master-c> ); this can be double checked in Route53 where kops will create DNS records for your services.
+Take extra care because kops will not start etcd and etcd-events with the same ID on <master-b> an/or <master-c> for example but will mix them (ex: etcd-b and etcd-events-c on <master-b> & etcd-c and etcd-events-b on <master-c> ); this can be double checked in Route53 where kops will create DNS records for your services.
 
 If your 2nd spinned master failed and cluster becomes inconsistent edit the corresponding kops master instancegroup and switch ``MinSize`` and ``MaxSize`` to "0" and run an update on your cluster.
 
@@ -308,7 +308,7 @@ Reinitialize the etcd instances:
 * Delete the containers and the data directories while restoring also from previous backup:
 
 ```bash
-root@ip-172-20-116-230:~# docker stop $(docker ps | grep "gcr.io/google_containers/etcd" | awk '{print $1}')
+root@ip-172-20-116-230:~# docker stop $(docker ps | grep "k8s.gcr.io/etcd" | awk '{print $1}')
 root@ip-172-20-116-230:~# rm -r /mnt/master-vol-03b97b1249caf379a/var/etcd/data-events/member/
 root@ip-172-20-116-230:~# rm -r /mnt/master-vol-0dbfd1f3c60b8c509/var/etcd/data/member/
 root@ip-172-20-116-230:~# cp -R /mnt/master-vol-03b97b1249caf379a/var/etcd/data-events/backup/member  /mnt/master-vol-03b97b1249caf379a/var/etcd/data-events/

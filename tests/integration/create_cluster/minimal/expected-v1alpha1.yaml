@@ -14,18 +14,24 @@ spec:
   cloudProvider: aws
   configBase: memfs://tests/minimal.example.com
   etcdClusters:
-  - etcdMembers:
+  - cpuRequest: 200m
+    etcdMembers:
     - name: a
       zone: us-test-1a
+    memoryRequest: 100Mi
     name: main
-  - etcdMembers:
+  - cpuRequest: 100m
+    etcdMembers:
     - name: a
       zone: us-test-1a
+    memoryRequest: 100Mi
     name: events
   iam:
     allowContainerRegistry: true
     legacy: false
-  kubernetesVersion: v1.12.0
+  kubelet:
+    anonymousAuth: false
+  kubernetesVersion: v1.11.0
   masterPublicName: api.minimal.example.com
   networkCIDR: 172.20.0.0/16
   networking:
@@ -50,7 +56,7 @@ metadata:
     kops.k8s.io/cluster: minimal.example.com
   name: master-us-test-1a
 spec:
-  image: kope.io/k8s-1.9-debian-jessie-amd64-hvm-ebs-2018-03-11
+  image: kope.io/k8s-1.11-debian-stretch-amd64-hvm-ebs-2018-08-17
   machineType: m3.medium
   maxSize: 1
   minSize: 1
@@ -70,7 +76,7 @@ metadata:
     kops.k8s.io/cluster: minimal.example.com
   name: nodes
 spec:
-  image: kope.io/k8s-1.9-debian-jessie-amd64-hvm-ebs-2018-03-11
+  image: kope.io/k8s-1.11-debian-stretch-amd64-hvm-ebs-2018-08-17
   machineType: t2.medium
   maxSize: 2
   minSize: 2

@@ -21,12 +21,15 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
 )
 
-const BastionELBSecurityGroupPrefix = "bastion"
-const BastionELBDefaultIdleTimeout = 5 * time.Minute
+const (
+	BastionELBSecurityGroupPrefix = "bastion"
+	BastionELBDefaultIdleTimeout  = 5 * time.Minute
+)
 
 // BastionModelBuilder adds model objects to support bastions
 //
@@ -207,6 +210,13 @@ func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
 			idleTimeout = time.Second * time.Duration(*b.Cluster.Spec.Topology.Bastion.IdleTimeoutSeconds)
 		}
 
+		tags := b.CloudTags(loadBalancerName, false)
+		for k, v := range b.Cluster.Spec.CloudLabels {
+			tags[k] = v
+		}
+		// Override the returned name to be the expected ELB name
+		tags["Name"] = "bastion." + b.ClusterName()
+
 		elb = &awstasks.LoadBalancer{
 			Name:      s("bastion." + b.ClusterName()),
 			Lifecycle: b.Lifecycle,
@@ -231,23 +241,30 @@ func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
 			ConnectionSettings: &awstasks.LoadBalancerConnectionSettings{
 				IdleTimeout: i64(int64(idleTimeout.Seconds())),
 			},
+
+			Tags: tags,
 		}
 
 		c.AddTask(elb)
 	}
 
-	for _, ig := range bastionInstanceGroups {
-		// We build the ASG when we iterate over the instance groups
+	// When Spotinst Elastigroups are used, there is no need to create
+	// a separate task for the attachment of the load balancer since this
+	// is already done as part of the Elastigroup's creation, if needed.
+	if !featureflag.Spotinst.Enabled() {
+		for _, ig := range bastionInstanceGroups {
+			// We build the ASG when we iterate over the instance groups
 
-		// Attach the ELB to the ASG
-		t := &awstasks.LoadBalancerAttachment{
-			Name:      s("bastion-elb-attachment"),
-			Lifecycle: b.Lifecycle,
+			// Attach the ELB to the ASG
+			t := &awstasks.LoadBalancerAttachment{
+				Name:      s("bastion-elb-attachment"),
+				Lifecycle: b.Lifecycle,
 
-			LoadBalancer:     elb,
-			AutoscalingGroup: b.LinkToAutoscalingGroup(ig),
+				LoadBalancer:     elb,
+				AutoscalingGroup: b.LinkToAutoscalingGroup(ig),
+			}
+			c.AddTask(t)
 		}
-		c.AddTask(t)
 	}
 
 	bastionPublicName := ""

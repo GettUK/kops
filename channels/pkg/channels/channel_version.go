@@ -23,7 +23,7 @@ import (
 
 	"github.com/blang/semver"
 	"github.com/golang/glog"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -120,9 +120,8 @@ func (c *ChannelVersion) replaces(existing *ChannelVersion) bool {
 			// Same version; check ids
 			if c.Id == existing.Id {
 				return false
-			} else {
-				glog.V(4).Infof("Channels had same version %q but different ids (%q vs %q); will replace", *c.Version, c.Id, existing.Id)
 			}
+			glog.V(4).Infof("Channels had same version %q but different ids (%q vs %q); will replace", *c.Version, c.Id, existing.Id)
 		}
 	}
 

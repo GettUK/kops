@@ -29,11 +29,12 @@ import (
 	"github.com/aws/aws-sdk-go/service/iam/iamiface"
 	"github.com/aws/aws-sdk-go/service/route53/route53iface"
 	"github.com/golang/glog"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
 	dnsproviderroute53 "k8s.io/kops/dnsprovider/pkg/dnsprovider/providers/aws/route53"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/cloudinstances"
+	"k8s.io/kops/pkg/resources/spotinst"
 	"k8s.io/kops/upup/pkg/fi"
 )
 
@@ -78,6 +79,7 @@ type MockCloud struct {
 	MockRoute53        route53iface.Route53API
 	MockELB            elbiface.ELBAPI
 	MockELBV2          elbv2iface.ELBV2API
+	MockSpotinst       spotinst.Service
 }
 
 func (c *MockAWSCloud) DeleteGroup(g *cloudinstances.CloudInstanceGroup) error {
@@ -160,6 +162,10 @@ func (c *MockAWSCloud) CreateELBTags(loadBalancerName string, tags map[string]st
 	return createELBTags(c, loadBalancerName, tags)
 }
 
+func (c *MockAWSCloud) RemoveELBTags(loadBalancerName string, tags map[string]string) error {
+	return removeELBTags(c, loadBalancerName, tags)
+}
+
 func (c *MockAWSCloud) GetELBV2Tags(ResourceArn string) (map[string]string, error) {
 	return getELBV2Tags(c, ResourceArn)
 }
@@ -234,6 +240,13 @@ func (c *MockAWSCloud) Route53() route53iface.Route53API {
 		glog.Fatalf("MockRoute53 not set")
 	}
 	return c.MockRoute53
+}
+
+func (c *MockAWSCloud) Spotinst() spotinst.Service {
+	if c.MockSpotinst == nil {
+		glog.Fatalf("MockSpotinst not set")
+	}
+	return c.MockSpotinst
 }
 
 func (c *MockAWSCloud) FindVPCInfo(id string) (*fi.VPCInfo, error) {

@@ -182,6 +182,24 @@ func Test_RunKubeletBuilder(t *testing.T) {
 	}
 	context.AddTask(fileTask)
 
+	{
+		task, err := builder.buildManifestDirectory(kubeletConfig)
+		if err != nil {
+			t.Fatalf("error from KubeletBuilder buildManifestDirectory: %v", err)
+			return
+		}
+		context.AddTask(task)
+	}
+
+	{
+		task := builder.buildSystemdService()
+		if err != nil {
+			t.Fatalf("error from KubeletBuilder buildSystemdService: %v", err)
+			return
+		}
+		context.AddTask(task)
+	}
+
 	testutils.ValidateTasks(t, basedir, context)
 }
 

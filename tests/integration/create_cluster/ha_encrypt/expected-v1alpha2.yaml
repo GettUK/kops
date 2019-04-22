@@ -12,7 +12,8 @@ spec:
   cloudProvider: aws
   configBase: memfs://tests/ha.example.com
   etcdClusters:
-  - etcdMembers:
+  - cpuRequest: 200m
+    etcdMembers:
     - encryptedVolume: true
       instanceGroup: master-us-test-1a
       name: a
@@ -22,8 +23,10 @@ spec:
     - encryptedVolume: true
       instanceGroup: master-us-test-1c
       name: c
+    memoryRequest: 100Mi
     name: main
-  - etcdMembers:
+  - cpuRequest: 100m
+    etcdMembers:
     - encryptedVolume: true
       instanceGroup: master-us-test-1a
       name: a
@@ -33,6 +36,7 @@ spec:
     - encryptedVolume: true
       instanceGroup: master-us-test-1c
       name: c
+    memoryRequest: 100Mi
     name: events
   iam:
     allowContainerRegistry: true
@@ -76,7 +80,7 @@ metadata:
     kops.k8s.io/cluster: ha.example.com
   name: master-us-test-1a
 spec:
-  image: kope.io/k8s-1.5-debian-jessie-amd64-hvm-ebs-2018-03-11
+  image: kope.io/k8s-1.5-debian-jessie-amd64-hvm-ebs-2018-08-17
   machineType: m3.medium
   maxSize: 1
   minSize: 1
@@ -96,7 +100,7 @@ metadata:
     kops.k8s.io/cluster: ha.example.com
   name: master-us-test-1b
 spec:
-  image: kope.io/k8s-1.5-debian-jessie-amd64-hvm-ebs-2018-03-11
+  image: kope.io/k8s-1.5-debian-jessie-amd64-hvm-ebs-2018-08-17
   machineType: m3.medium
   maxSize: 1
   minSize: 1
@@ -116,7 +120,7 @@ metadata:
     kops.k8s.io/cluster: ha.example.com
   name: master-us-test-1c
 spec:
-  image: kope.io/k8s-1.5-debian-jessie-amd64-hvm-ebs-2018-03-11
+  image: kope.io/k8s-1.5-debian-jessie-amd64-hvm-ebs-2018-08-17
   machineType: m3.medium
   maxSize: 1
   minSize: 1
@@ -136,7 +140,7 @@ metadata:
     kops.k8s.io/cluster: ha.example.com
   name: nodes
 spec:
-  image: kope.io/k8s-1.5-debian-jessie-amd64-hvm-ebs-2018-03-11
+  image: kope.io/k8s-1.5-debian-jessie-amd64-hvm-ebs-2018-08-17
   machineType: t2.medium
   maxSize: 2
   minSize: 2

@@ -1,24 +1,27 @@
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+
 #=============================================================================
 # Go rules
 
 http_archive(
     name = "io_bazel_rules_go",
-    url = "https://github.com/bazelbuild/rules_go/releases/download/0.14.1/rules_go-0.14.1.tar.gz",
-    sha256 = "ee0e3b346388c447f13009d789c8bf2d7bae4643ac70bd7997ded0ad09b2fff7",
+    url = "https://github.com/bazelbuild/rules_go/releases/download/0.18.2/rules_go-0.18.2.tar.gz",
+    sha256 = "31f959ecf3687f6e0bb9d01e1e7a7153367ecd82816c9c0ae149cd0e5a92bf8c",
 )
 
 http_archive(
     name = "bazel_gazelle",
-    url = "https://github.com/bazelbuild/bazel-gazelle/releases/download/0.14.0/bazel-gazelle-0.14.0.tar.gz",
-    sha256 = "c0a5739d12c6d05b6c1ad56f2200cb0b57c5a70e03ebd2f7b87ce88cabf09c7b",
+    urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/0.17.0/bazel-gazelle-0.17.0.tar.gz"],
+    sha256 = "3c681998538231a2d24d0c07ed5a7658cb72bfb5fd4bf9911157c0e9ac6a2687",
 )
 
-load("@io_bazel_rules_go//go:def.bzl", "go_rules_dependencies", "go_register_toolchains")
+load("@io_bazel_rules_go//go:deps.bzl", "go_rules_dependencies", "go_register_toolchains")
 
 go_rules_dependencies()
 
 go_register_toolchains(
-    go_version = "1.10.3",
+    go_version = "1.10.8",
 )
 
 load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies")
@@ -31,16 +34,20 @@ gazelle_dependencies()
 git_repository(
     name = "io_bazel_rules_docker",
     remote = "https://github.com/bazelbuild/rules_docker.git",
-    tag = "v0.4.0",
+    tag = "v0.7.0",
 )
 
 load(
-    "@io_bazel_rules_docker//container:container.bzl",
-    "container_pull",
+    "@io_bazel_rules_docker//repositories:repositories.bzl",
     container_repositories = "repositories",
 )
 
 container_repositories()
+
+load(
+    "@io_bazel_rules_docker//container:container.bzl",
+    "container_pull",
+)
 
 container_pull(
     name = "debian_hyperkube_base_amd64",
@@ -54,7 +61,7 @@ container_pull(
 git_repository(
     name = "distroless",
     remote = "https://github.com/googlecloudplatform/distroless.git",
-    commit = "886114394dfed219001ec3b068b139a3456e49d4",
+    commit = "3585653b2b0d33c3fb369b907ef68df8344fd2ad",
 )
 
 load(
@@ -70,8 +77,8 @@ dpkg_src(
     name = "debian_stretch",
     arch = "amd64",
     distro = "stretch",
-    sha256 = "4cb2fac3e32292613b92d3162e99eb8a1ed7ce47d1b142852b0de3092b25910c",
-    snapshot = "20180406T154421Z",
+    sha256 = "4b981bd2445d85cf1d93ea9f2d2dc235d20543ecdadd0d8065a10793b94eab9b",
+    snapshot = "20190131T155411Z",
     url = "http://snapshot.debian.org/archive",
 )
 
@@ -96,4 +103,13 @@ dpkg_list(
     sources = [
         "@debian_stretch//file:Packages.json",
     ],
+)
+
+# We use the prebuilt utils.tar.gz containing socat & conntrack, building it in bazel is really painful
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "utils_tar_gz",
+    urls = ["https://kubeupv2.s3.amazonaws.com/kops/1.11.1/linux/amd64/utils.tar.gz"],
+    sha256 = "0e685eb751a32f782705311049b2592c4724add6f19ffdad1e7ce4f55816d7d8",
 )

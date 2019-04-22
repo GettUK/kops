@@ -23,6 +23,8 @@ import (
 	"path"
 	"strings"
 
+	"k8s.io/kops/pkg/k8sversion"
+
 	"github.com/blang/semver"
 	"github.com/golang/glog"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,6 +47,7 @@ import (
 	"k8s.io/kops/pkg/model/domodel"
 	"k8s.io/kops/pkg/model/gcemodel"
 	"k8s.io/kops/pkg/model/openstackmodel"
+	"k8s.io/kops/pkg/model/spotinstmodel"
 	"k8s.io/kops/pkg/model/vspheremodel"
 	"k8s.io/kops/pkg/resources/digitalocean"
 	"k8s.io/kops/pkg/templates"
@@ -62,10 +65,12 @@ import (
 	"k8s.io/kops/upup/pkg/fi/cloudup/gcetasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstacktasks"
+	"k8s.io/kops/upup/pkg/fi/cloudup/spotinsttasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/vsphere"
 	"k8s.io/kops/upup/pkg/fi/cloudup/vspheretasks"
 	"k8s.io/kops/upup/pkg/fi/fitasks"
+	"k8s.io/kops/util/pkg/hashing"
 	"k8s.io/kops/util/pkg/vfs"
 )
 
@@ -80,6 +85,8 @@ var (
 	AlphaAllowDO = featureflag.New("AlphaAllowDO", featureflag.Bool(false))
 	// AlphaAllowGCE is a feature flag that gates GCE support while it is alpha
 	AlphaAllowGCE = featureflag.New("AlphaAllowGCE", featureflag.Bool(false))
+	// AlphaAllowOpenstack is a feature flag that gates OpenStack support while it is alpha
+	AlphaAllowOpenstack = featureflag.New("AlphaAllowOpenstack", featureflag.Bool(false))
 	// AlphaAllowVsphere is a feature flag that gates vsphere support while it is alpha
 	AlphaAllowVsphere = featureflag.New("AlphaAllowVsphere", featureflag.Bool(false))
 	// AlphaAllowALI is a feature flag that gates aliyun support while it is alpha
@@ -115,7 +122,7 @@ type ApplyClusterCmd struct {
 	// Formats:
 	//  raw url: http://... or https://...
 	//  url with hash: <hex>@http://... or <hex>@https://...
-	Assets []string
+	Assets []*MirroredAsset
 
 	Clientset simple.Clientset
 
@@ -276,6 +283,36 @@ func (c *ApplyClusterCmd) Run() error {
 		cluster.Spec.KubernetesVersion = versionWithoutV
 	}
 
+	kv, err := k8sversion.Parse(cluster.Spec.KubernetesVersion)
+	if err != nil {
+		return err
+	}
+
+	// check if we should recommend turning off anonymousAuth on k8s versions gte than 1.10
+	// we do 1.10 since this is a really critical issues and 1.10 has it
+	if kv.IsGTE("1.10") {
+		// we do a check here because setting modifying the kubelet object messes with the output
+		warn := false
+		if cluster.Spec.Kubelet == nil {
+			warn = true
+		} else if cluster.Spec.Kubelet.AnonymousAuth == nil {
+			warn = true
+		}
+
+		if warn {
+			fmt.Println("")
+			fmt.Printf(starline)
+			fmt.Println("")
+			fmt.Println("Kubelet anonymousAuth is currently turned on. This allows RBAC escalation and remote code execution possibilites.")
+			fmt.Println("It is highly recommended you turn it off by setting 'spec.kubelet.anonymousAuth' to 'false' via 'kops edit cluster'")
+			fmt.Println("")
+			fmt.Println("See https://github.com/kubernetes/kops/blob/master/docs/security.md#kubelet-api")
+			fmt.Println("")
+			fmt.Printf(starline)
+			fmt.Println("")
+		}
+	}
+
 	if err := c.AddFileAssets(assetBuilder); err != nil {
 		return err
 	}
@@ -399,6 +436,9 @@ func (c *ApplyClusterCmd) Run() error {
 				// Autoscaling
 				"autoscalingGroup":    &awstasks.AutoscalingGroup{},
 				"launchConfiguration": &awstasks.LaunchConfiguration{},
+
+				// Spotinst
+				"spotinstElastigroup": &spotinsttasks.Elastigroup{},
 			})
 
 			if len(sshPublicKeys) == 0 {
@@ -475,14 +515,28 @@ func (c *ApplyClusterCmd) Run() error {
 
 	case kops.CloudProviderOpenstack:
 		{
+			if !AlphaAllowOpenstack.Enabled() {
+				return fmt.Errorf("Openstack support is currently alpha, and is feature-gated.  export KOPS_FEATURE_FLAGS=AlphaAllowOpenstack")
+			}
+
 			osCloud := cloud.(openstack.OpenstackCloud)
 			region = osCloud.Region()
 
 			l.AddTypes(map[string]interface{}{
-				"sshKey": &openstacktasks.SSHKey{},
+				// Compute
+				"sshKey":      &openstacktasks.SSHKey{},
+				"serverGroup": &openstacktasks.ServerGroup{},
+				"instance":    &openstacktasks.Instance{},
 				// Networking
-				"network": &openstacktasks.Network{},
-				"router":  &openstacktasks.Router{},
+				"network":           &openstacktasks.Network{},
+				"subnet":            &openstacktasks.Subnet{},
+				"router":            &openstacktasks.Router{},
+				"securityGroup":     &openstacktasks.SecurityGroup{},
+				"securityGroupRule": &openstacktasks.SecurityGroupRule{},
+				// BlockStorage
+				"volume": &openstacktasks.Volume{},
+				// LB
+				"lb": &openstacktasks.LB{},
 			})
 
 			if len(sshPublicKeys) == 0 {
@@ -621,7 +675,7 @@ func (c *ApplyClusterCmd) Run() error {
 				l.Builders = append(l.Builders,
 					&model.MasterVolumeBuilder{KopsModelContext: modelContext, Lifecycle: &clusterLifecycle},
 					&alimodel.APILoadBalancerModelBuilder{ALIModelContext: aliModelContext, Lifecycle: &clusterLifecycle},
-					&alimodel.NetWorkModelBuilder{ALIModelContext: aliModelContext, Lifecycle: &clusterLifecycle},
+					&alimodel.NetworkModelBuilder{ALIModelContext: aliModelContext, Lifecycle: &clusterLifecycle},
 					&alimodel.RAMModelBuilder{ALIModelContext: aliModelContext, Lifecycle: &clusterLifecycle},
 					&alimodel.SSHKeyModelBuilder{ALIModelContext: aliModelContext, Lifecycle: &clusterLifecycle},
 					&alimodel.FirewallModelBuilder{ALIModelContext: aliModelContext, Lifecycle: &clusterLifecycle},
@@ -640,8 +694,11 @@ func (c *ApplyClusterCmd) Run() error {
 				}
 
 				l.Builders = append(l.Builders,
+					&model.MasterVolumeBuilder{KopsModelContext: modelContext, Lifecycle: &clusterLifecycle},
+					// &openstackmodel.APILBModelBuilder{OpenstackModelContext: openstackModelContext, Lifecycle: &clusterLifecycle},
 					&openstackmodel.NetworkModelBuilder{OpenstackModelContext: openstackModelContext, Lifecycle: &networkLifecycle},
 					&openstackmodel.SSHKeyModelBuilder{OpenstackModelContext: openstackModelContext, Lifecycle: &securityLifecycle},
+					&openstackmodel.FirewallModelBuilder{OpenstackModelContext: openstackModelContext, Lifecycle: &securityLifecycle},
 				)
 
 			default:
@@ -673,13 +730,21 @@ func (c *ApplyClusterCmd) Run() error {
 			KopsModelContext: modelContext,
 		}
 
-		l.Builders = append(l.Builders, &awsmodel.AutoscalingGroupModelBuilder{
-			AWSModelContext: awsModelContext,
-			BootstrapScript: bootstrapScriptBuilder,
-			Lifecycle:       &clusterLifecycle,
-
-			SecurityLifecycle: &securityLifecycle,
-		})
+		if featureflag.Spotinst.Enabled() {
+			l.Builders = append(l.Builders, &spotinstmodel.ElastigroupModelBuilder{
+				AWSModelContext:   awsModelContext,
+				BootstrapScript:   bootstrapScriptBuilder,
+				Lifecycle:         &clusterLifecycle,
+				SecurityLifecycle: &securityLifecycle,
+			})
+		} else {
+			l.Builders = append(l.Builders, &awsmodel.AutoscalingGroupModelBuilder{
+				AWSModelContext:   awsModelContext,
+				BootstrapScript:   bootstrapScriptBuilder,
+				Lifecycle:         &clusterLifecycle,
+				SecurityLifecycle: &securityLifecycle,
+			})
+		}
 	case kops.CloudProviderDO:
 		doModelContext := &domodel.DOModelContext{
 			KopsModelContext: modelContext,
@@ -733,6 +798,15 @@ func (c *ApplyClusterCmd) Run() error {
 		// BareMetal tasks will go here
 
 	case kops.CloudProviderOpenstack:
+		openstackModelContext := &openstackmodel.OpenstackModelContext{
+			KopsModelContext: modelContext,
+		}
+
+		l.Builders = append(l.Builders, &openstackmodel.ServerGroupModelBuilder{
+			OpenstackModelContext: openstackModelContext,
+			BootstrapScript:       bootstrapScriptBuilder,
+			Lifecycle:             &clusterLifecycle,
+		})
 
 	default:
 		return fmt.Errorf("unknown cloudprovider %q", cluster.Spec.CloudProvider)
@@ -1067,16 +1141,39 @@ func (c *ApplyClusterCmd) AddFileAssets(assetBuilder *assets.AssetBuilder) error
 		if err != nil {
 			return err
 		}
-		c.Assets = append(c.Assets, hash.Hex()+"@"+u.String())
+		c.Assets = append(c.Assets, BuildMirroredAsset(u, hash))
 	}
 
 	if usesCNI(c.Cluster) {
-		cniAsset, cniAssetHashString, err := findCNIAssets(c.Cluster, assetBuilder)
+		cniAsset, cniAssetHash, err := findCNIAssets(c.Cluster, assetBuilder)
 		if err != nil {
 			return err
 		}
 
-		c.Assets = append(c.Assets, cniAssetHashString+"@"+cniAsset.String())
+		c.Assets = append(c.Assets, BuildMirroredAsset(cniAsset, cniAssetHash))
+	}
+
+	if c.Cluster.Spec.Networking.LyftVPC != nil {
+		var hash *hashing.Hash
+
+		urlString := os.Getenv("LYFT_VPC_DOWNLOAD_URL")
+		if urlString == "" {
+			urlString = "https://github.com/lyft/cni-ipvlan-vpc-k8s/releases/download/v0.4.2/cni-ipvlan-vpc-k8s-v0.4.2.tar.gz"
+			hash, err = hashing.FromString("bfdc65028a3bf8ffe14388fca28ede3600e7e2dee4e781908b6a23f9e79f86ad")
+			if err != nil {
+				// Should be impossible
+				return fmt.Errorf("invalid hard-coded hash for lyft url")
+			}
+		} else {
+			glog.Warningf("Using url from LYFT_VPC_DOWNLOAD_URL env var: %q", urlString)
+		}
+
+		u, err := url.Parse(urlString)
+		if err != nil {
+			return fmt.Errorf("unable to parse lyft-vpc URL %q", urlString)
+		}
+
+		c.Assets = append(c.Assets, BuildMirroredAsset(u, hash))
 	}
 
 	// TODO figure out if we can only do this for CoreOS only and GCE Container OS
@@ -1089,7 +1186,7 @@ func (c *ApplyClusterCmd) AddFileAssets(assetBuilder *assets.AssetBuilder) error
 		if err != nil {
 			return err
 		}
-		c.Assets = append(c.Assets, hash.Hex()+"@"+utilsLocation.String())
+		c.Assets = append(c.Assets, BuildMirroredAsset(utilsLocation, hash))
 	}
 
 	n, hash, err := NodeUpLocation(assetBuilder)
@@ -1181,7 +1278,9 @@ func (c *ApplyClusterCmd) BuildNodeUpConfig(assetBuilder *assets.AssetBuilder, i
 		config.Tags = append(config.Tags, tag)
 	}
 
-	config.Assets = c.Assets
+	for _, a := range c.Assets {
+		config.Assets = append(config.Assets, a.CompactString())
+	}
 	config.ClusterName = cluster.ObjectMeta.Name
 	config.ConfigBase = fi.String(configBase.Path())
 	config.InstanceGroupName = ig.ObjectMeta.Name
@@ -1209,23 +1308,25 @@ func (c *ApplyClusterCmd) BuildNodeUpConfig(assetBuilder *assets.AssetBuilder, i
 			}
 
 			image := &nodeup.Image{
-				Source: u.String(),
-				Hash:   hash.Hex(),
+				Sources: []string{u.String()},
+				Hash:    hash.Hex(),
 			}
 			images = append(images, image)
 		}
 	}
 
 	{
-		location, hash, err := ProtokubeImageSource(assetBuilder)
+		u, hash, err := ProtokubeImageSource(assetBuilder)
 		if err != nil {
 			return nil, err
 		}
 
+		asset := BuildMirroredAsset(u, hash)
+
 		config.ProtokubeImage = &nodeup.Image{
-			Name:   kopsbase.DefaultProtokubeImageName(),
-			Source: location.String(),
-			Hash:   hash.Hex(),
+			Name:    kopsbase.DefaultProtokubeImageName(),
+			Sources: asset.Locations,
+			Hash:    asset.Hash.Hex(),
 		}
 	}
 

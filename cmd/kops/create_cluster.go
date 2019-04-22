@@ -31,8 +31,10 @@ import (
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kops"
 	"k8s.io/kops/cmd/kops/util"
 	api "k8s.io/kops/pkg/apis/kops"
@@ -43,6 +45,8 @@ import (
 	"k8s.io/kops/pkg/commands"
 	"k8s.io/kops/pkg/dns"
 	"k8s.io/kops/pkg/featureflag"
+	"k8s.io/kops/pkg/k8sversion"
+	"k8s.io/kops/pkg/model/components"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/aliup"
@@ -73,6 +77,7 @@ type CreateClusterOptions struct {
 	MasterVolumeSize     int32
 	NodeVolumeSize       int32
 	EncryptEtcdStorage   bool
+	EtcdStorageType      string
 	Project              string
 	KubernetesVersion    string
 	OutDir               string
@@ -80,6 +85,7 @@ type CreateClusterOptions struct {
 	VPCID                string
 	SubnetIDs            []string
 	UtilitySubnetIDs     []string
+	DisableSubnetTags    bool
 	NetworkCIDR          string
 	DNSZone              string
 	AdminAccess          []string
@@ -138,6 +144,20 @@ type CreateClusterOptions struct {
 	// We need VSphereDatastore to support Kubernetes vSphere Cloud Provider (v1.5.3)
 	// We can remove this once we support higher versions.
 	VSphereDatastore string
+
+	// Spotinst options
+	SpotinstProduct     string
+	SpotinstOrientation string
+
+	// OpenstackExternalNet is the name of the external network for the openstack router
+	OpenstackExternalNet     string
+	OpenstackExternalSubnet  string
+	OpenstackStorageIgnoreAZ bool
+	OpenstackDNSServers      string
+	OpenstackLbSubnet        string
+
+	// OpenstackLBOctavia is boolean value should we use octavia or old loadbalancer api
+	OpenstackLBOctavia bool
 
 	// ConfigBase is the location where we will store the configuration, it defaults to the state store
 	ConfigBase string
@@ -269,7 +289,7 @@ func NewCmdCreateCluster(f *util.Factory, out io.Writer) *cobra.Command {
 		cmd.Flags().StringVar(&options.ConfigBase, "config-base", options.ConfigBase, "A cluster-readable location where we mirror configuration information, separate from the state store.  Allows for a state store that is not accessible from the cluster.")
 	}
 
-	cmd.Flags().StringVar(&options.Cloud, "cloud", options.Cloud, "Cloud provider to use - gce, aws, vsphere")
+	cmd.Flags().StringVar(&options.Cloud, "cloud", options.Cloud, "Cloud provider to use - gce, aws, vsphere, openstack")
 
 	cmd.Flags().StringSliceVar(&options.Zones, "zones", options.Zones, "Zones in which to run the cluster")
 	cmd.Flags().StringSliceVar(&options.MasterZones, "master-zones", options.MasterZones, "Zones in which to run masters (must be an odd number)")
@@ -290,14 +310,16 @@ func NewCmdCreateCluster(f *util.Factory, out io.Writer) *cobra.Command {
 	cmd.Flags().StringSliceVar(&options.SubnetIDs, "subnets", options.SubnetIDs, "Set to use shared subnets")
 	cmd.Flags().StringSliceVar(&options.UtilitySubnetIDs, "utility-subnets", options.UtilitySubnetIDs, "Set to use shared utility subnets")
 	cmd.Flags().StringVar(&options.NetworkCIDR, "network-cidr", options.NetworkCIDR, "Set to override the default network CIDR")
+	cmd.Flags().BoolVar(&options.DisableSubnetTags, "disable-subnet-tags", options.DisableSubnetTags, "Set to disable automatic subnet tagging")
 
 	cmd.Flags().Int32Var(&options.MasterCount, "master-count", options.MasterCount, "Set the number of masters.  Defaults to one master per master-zone")
 	cmd.Flags().Int32Var(&options.NodeCount, "node-count", options.NodeCount, "Set the number of nodes")
 	cmd.Flags().BoolVar(&options.EncryptEtcdStorage, "encrypt-etcd-storage", options.EncryptEtcdStorage, "Generate key in aws kms and use it for encrypt etcd volumes")
+	cmd.Flags().StringVar(&options.EtcdStorageType, "etcd-storage-type", options.EtcdStorageType, "The default storage type for etc members")
 
 	cmd.Flags().StringVar(&options.Image, "image", options.Image, "Image to use for all instances.")
 
-	cmd.Flags().StringVar(&options.Networking, "networking", "kubenet", "Networking mode to use.  kubenet (default), classic, external, kopeio-vxlan (or kopeio), weave, flannel-vxlan (or flannel), flannel-udp, calico, canal, kube-router, romana, amazon-vpc-routed-eni, cilium.")
+	cmd.Flags().StringVar(&options.Networking, "networking", "kubenet", "Networking mode to use.  kubenet (default), classic, external, kopeio-vxlan (or kopeio), weave, flannel-vxlan (or flannel), flannel-udp, calico, canal, kube-router, romana, amazon-vpc-routed-eni, cilium, cni.")
 
 	cmd.Flags().StringVar(&options.DNSZone, "dns-zone", options.DNSZone, "DNS hosted zone to use (defaults to longest matching zone)")
 	cmd.Flags().StringVar(&options.OutDir, "out", options.OutDir, "Path to write any local output")
@@ -325,7 +347,7 @@ func NewCmdCreateCluster(f *util.Factory, out io.Writer) *cobra.Command {
 	cmd.Flags().BoolVar(&options.Bastion, "bastion", options.Bastion, "Pass the --bastion flag to enable a bastion instance group. Only applies to private topology.")
 
 	// Allow custom tags from the CLI
-	cmd.Flags().StringVar(&options.CloudLabels, "cloud-labels", options.CloudLabels, "A list of KV pairs used to tag all instance groups in AWS (eg \"Owner=John Doe,Team=Some Team\").")
+	cmd.Flags().StringVar(&options.CloudLabels, "cloud-labels", options.CloudLabels, "A list of KV pairs used to tag all instance groups in AWS (e.g. \"Owner=John Doe,Team=Some Team\").")
 
 	// Master and Node Tenancy
 	cmd.Flags().StringVar(&options.MasterTenancy, "master-tenancy", options.MasterTenancy, "The tenancy of the master group on AWS. Can either be default or dedicated.")
@@ -353,6 +375,23 @@ func NewCmdCreateCluster(f *util.Factory, out io.Writer) *cobra.Command {
 		cmd.Flags().StringVar(&options.VSphereCoreDNSServer, "vsphere-coredns-server", options.VSphereCoreDNSServer, "vsphere-coredns-server is required for vSphere.")
 		cmd.Flags().StringVar(&options.VSphereDatastore, "vsphere-datastore", options.VSphereDatastore, "vsphere-datastore is required for vSphere.  Set a valid datastore in which to store dynamic provision volumes.")
 	}
+
+	if featureflag.Spotinst.Enabled() {
+		// Spotinst flags
+		cmd.Flags().StringVar(&options.SpotinstProduct, "spotinst-product", options.SpotinstProduct, "Set the product description (valid values: Linux/UNIX, Linux/UNIX (Amazon VPC), Windows and Windows (Amazon VPC))")
+		cmd.Flags().StringVar(&options.SpotinstOrientation, "spotinst-orientation", options.SpotinstOrientation, "Set the prediction strategy (valid values: balanced, cost, equal-distribution and availability)")
+	}
+
+	if cloudup.AlphaAllowOpenstack.Enabled() {
+		// Openstack flags
+		cmd.Flags().StringVar(&options.OpenstackExternalNet, "os-ext-net", options.OpenstackExternalNet, "The name of the external network to use with the openstack router")
+		cmd.Flags().StringVar(&options.OpenstackExternalSubnet, "os-ext-subnet", options.OpenstackExternalSubnet, "The name of the external floating subnet to use with the openstack router")
+		cmd.Flags().StringVar(&options.OpenstackLbSubnet, "os-lb-floating-subnet", options.OpenstackLbSubnet, "The name of the external subnet to use with the kubernetes api")
+		cmd.Flags().BoolVar(&options.OpenstackStorageIgnoreAZ, "os-kubelet-ignore-az", options.OpenstackStorageIgnoreAZ, "If true kubernetes may attach volumes across availability zones")
+		cmd.Flags().BoolVar(&options.OpenstackLBOctavia, "os-octavia", options.OpenstackLBOctavia, "If true octavia loadbalancer api will be used")
+		cmd.Flags().StringVar(&options.OpenstackDNSServers, "os-dns-servers", options.OpenstackDNSServers, "comma separated list of DNS Servers which is used in network")
+	}
+
 	return cmd
 }
 
@@ -485,9 +524,8 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 		if cluster.Spec.CloudProvider == "" {
 			if allZones.Len() == 0 {
 				return fmt.Errorf("must specify --zones or --cloud")
-			} else {
-				return fmt.Errorf("unable to infer CloudProvider from Zones (is there a typo in --zones?)")
 			}
+			return fmt.Errorf("unable to infer CloudProvider from Zones (is there a typo in --zones?)")
 		}
 	}
 
@@ -686,6 +724,20 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 			etcd := &api.EtcdClusterSpec{}
 			etcd.Name = etcdCluster
 
+			// if this is the main cluster, we use 200 millicores by default.
+			// otherwise we use 100 millicores by default.  100Mi is always default
+			// for event and main clusters.  This is changeable in the kops cluster
+			// configuration.
+			if etcd.Name == "main" {
+				cpuRequest := resource.MustParse("200m")
+				etcd.CPURequest = &cpuRequest
+			} else {
+				cpuRequest := resource.MustParse("100m")
+				etcd.CPURequest = &cpuRequest
+			}
+			memoryRequest := resource.MustParse("100Mi")
+			etcd.MemoryRequest = &memoryRequest
+
 			var names []string
 			for _, ig := range masters {
 				name := ig.ObjectMeta.Name
@@ -701,6 +753,9 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 				m := &api.EtcdMemberSpec{}
 				if c.EncryptEtcdStorage {
 					m.EncryptedVolume = &c.EncryptEtcdStorage
+				}
+				if len(c.EtcdStorageType) > 0 {
+					m.VolumeType = fi.String(c.EtcdStorageType)
 				}
 				m.Name = names[i]
 
@@ -840,6 +895,57 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 			}
 			cluster.Spec.CloudConfig.VSphereDatastore = fi.String(c.VSphereDatastore)
 		}
+
+		if featureflag.Spotinst.Enabled() {
+			if cluster.Spec.CloudConfig == nil {
+				cluster.Spec.CloudConfig = &api.CloudConfiguration{}
+			}
+			if c.SpotinstProduct != "" {
+				cluster.Spec.CloudConfig.SpotinstProduct = fi.String(c.SpotinstProduct)
+			}
+			if c.SpotinstOrientation != "" {
+				cluster.Spec.CloudConfig.SpotinstOrientation = fi.String(c.SpotinstOrientation)
+			}
+		}
+
+		if cloudup.AlphaAllowOpenstack.Enabled() && c.Cloud == "openstack" {
+			if cluster.Spec.CloudConfig == nil {
+				cluster.Spec.CloudConfig = &api.CloudConfiguration{}
+			}
+			provider := "haproxy"
+			if c.OpenstackLBOctavia {
+				provider = "octavia"
+			}
+			cluster.Spec.CloudConfig.Openstack = &api.OpenstackConfiguration{
+				Router: &api.OpenstackRouter{
+					ExternalNetwork: fi.String(c.OpenstackExternalNet),
+				},
+				Loadbalancer: &api.OpenstackLoadbalancerConfig{
+					FloatingNetwork: fi.String(c.OpenstackExternalNet),
+					Method:          fi.String("ROUND_ROBIN"),
+					Provider:        fi.String(provider),
+					UseOctavia:      fi.Bool(c.OpenstackLBOctavia),
+				},
+				BlockStorage: &api.OpenstackBlockStorageConfig{
+					Version:  fi.String("v2"),
+					IgnoreAZ: fi.Bool(c.OpenstackStorageIgnoreAZ),
+				},
+				Monitor: &api.OpenstackMonitor{
+					Delay:      fi.String("1m"),
+					Timeout:    fi.String("30s"),
+					MaxRetries: fi.Int(3),
+				},
+			}
+			if c.OpenstackDNSServers != "" {
+				cluster.Spec.CloudConfig.Openstack.Router.DNSServers = fi.String(c.OpenstackDNSServers)
+			}
+			if c.OpenstackExternalSubnet != "" {
+				cluster.Spec.CloudConfig.Openstack.Router.ExternalSubnet = fi.String(c.OpenstackExternalSubnet)
+			}
+			if c.OpenstackLbSubnet != "" {
+				cluster.Spec.CloudConfig.Openstack.Loadbalancer.FloatingSubnet = fi.String(c.OpenstackLbSubnet)
+			}
+		}
 	}
 
 	// Populate project
@@ -895,7 +1001,17 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 			Backend: "udp",
 		}
 	case "calico":
-		cluster.Spec.Networking.Calico = &api.CalicoNetworkingSpec{}
+		cluster.Spec.Networking.Calico = &api.CalicoNetworkingSpec{
+			MajorVersion: "v3",
+		}
+		// Validate to check if etcd clusters have an acceptable version
+		if errList := validation.ValidateEtcdVersionForCalicoV3(cluster.Spec.EtcdClusters[0], cluster.Spec.Networking.Calico.MajorVersion, field.NewPath("Calico")); len(errList) != 0 {
+
+			// This is not a special version but simply of the 3 series
+			for _, etcd := range cluster.Spec.EtcdClusters {
+				etcd.Version = components.DefaultEtcd3Version_1_11
+			}
+		}
 	case "canal":
 		cluster.Spec.Networking.Canal = &api.CanalNetworkingSpec{}
 	case "kube-router":
@@ -906,6 +1022,8 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 		cluster.Spec.Networking.AmazonVPC = &api.AmazonVPCNetworkingSpec{}
 	case "cilium":
 		cluster.Spec.Networking.Cilium = &api.CiliumNetworkingSpec{}
+	case "lyftvpc":
+		cluster.Spec.Networking.LyftVPC = &api.LyftVPCNetworkingSpec{}
 	default:
 		return fmt.Errorf("unknown networking mode %q", c.Networking)
 	}
@@ -922,6 +1040,8 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 		glog.Infof("Empty topology. Defaulting to public topology")
 		c.Topology = api.TopologyPublic
 	}
+
+	cluster.Spec.DisableSubnetTags = c.DisableSubnetTags
 
 	switch c.Topology {
 	case api.TopologyPublic:
@@ -941,7 +1061,7 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 
 	case api.TopologyPrivate:
 		if !supportsPrivateTopology(cluster.Spec.Networking) {
-			return fmt.Errorf("Invalid networking option %s. Currently only '--networking kopeio-vxlan (or kopeio)', '--networking weave', '--networking flannel', '--networking calico', '--networking canal', '--networking kube-router', '--networking romana', '--networking amazon-vpc-routed-eni' are supported for private topologies", c.Networking)
+			return fmt.Errorf("Invalid networking option %s. Currently only '--networking kopeio-vxlan (or kopeio)', '--networking weave', '--networking flannel', '--networking calico', '--networking canal', '--networking kube-router', '--networking romana', '--networking amazon-vpc-routed-eni' '--networking lyftvpc' '--networking cni' are supported for private topologies", c.Networking)
 		}
 		cluster.Spec.Topology = &api.TopologySpec{
 			Masters: api.TopologyPrivate,
@@ -1021,6 +1141,22 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 		cluster.Spec.MasterPublicName = c.MasterPublicName
 	}
 
+	kv, err := k8sversion.Parse(cluster.Spec.KubernetesVersion)
+	if err != nil {
+		return fmt.Errorf("failed to parse kubernetes version: %s", err.Error())
+	}
+
+	// check if we should set anonymousAuth to false on k8s versions >=1.11
+	if kv.IsGTE("1.11") {
+		if cluster.Spec.Kubelet == nil {
+			cluster.Spec.Kubelet = &api.KubeletConfigSpec{}
+		}
+
+		if cluster.Spec.Kubelet.AnonymousAuth == nil {
+			cluster.Spec.Kubelet.AnonymousAuth = fi.Bool(false)
+		}
+	}
+
 	// Populate the API access, so that it can be discoverable
 	// TODO: This is the same code as in defaults - try to dedup?
 	if cluster.Spec.API == nil {
@@ -1058,7 +1194,7 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 		}
 	}
 
-	if c.APISSLCertificate != "" {
+	if cluster.Spec.API.LoadBalancer != nil && c.APISSLCertificate != "" {
 		cluster.Spec.API.LoadBalancer.SSLCertificate = c.APISSLCertificate
 	}
 
@@ -1235,7 +1371,7 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 				fmt.Fprintf(&sb, " * edit your master instance group: kops edit ig --name=%s %s\n", clusterName, masters[0].ObjectMeta.Name)
 			}
 			fmt.Fprintf(&sb, "\n")
-			fmt.Fprintf(&sb, "Finally configure your cluster with: kops update cluster %s --yes\n", clusterName)
+			fmt.Fprintf(&sb, "Finally configure your cluster with: kops update cluster --name %s --yes\n", clusterName)
 			fmt.Fprintf(&sb, "\n")
 
 			_, err := out.Write(sb.Bytes())
@@ -1250,7 +1386,7 @@ func RunCreateCluster(f *util.Factory, out io.Writer, c *CreateClusterOptions) e
 
 func supportsPrivateTopology(n *api.NetworkingSpec) bool {
 
-	if n.CNI != nil || n.Kopeio != nil || n.Weave != nil || n.Flannel != nil || n.Calico != nil || n.Canal != nil || n.Kuberouter != nil || n.Romana != nil || n.AmazonVPC != nil || n.Cilium != nil {
+	if n.CNI != nil || n.Kopeio != nil || n.Weave != nil || n.Flannel != nil || n.Calico != nil || n.Canal != nil || n.Kuberouter != nil || n.Romana != nil || n.AmazonVPC != nil || n.Cilium != nil || n.LyftVPC != nil {
 		return true
 	}
 	return false
@@ -1345,11 +1481,9 @@ func loadSSHPublicKeys(sshPublicKey string) (map[string][]byte, error) {
 		authorized, err := ioutil.ReadFile(sshPublicKey)
 		if err != nil {
 			return nil, err
-		} else {
-			sshPublicKeys[fi.SecretNameSSHPrimary] = authorized
-
-			glog.Infof("Using SSH public key: %v\n", sshPublicKey)
 		}
+		sshPublicKeys[fi.SecretNameSSHPrimary] = authorized
+		glog.Infof("Using SSH public key: %v\n", sshPublicKey)
 	}
 	return sshPublicKeys, nil
 }

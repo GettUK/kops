@@ -17,6 +17,7 @@ limitations under the License.
 package validation
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/model/components"
+	"k8s.io/kops/pkg/util/subnet"
 	"k8s.io/kops/upup/pkg/fi"
 
 	"github.com/blang/semver"
@@ -106,6 +108,10 @@ func ValidateCluster(c *kops.Cluster, strict bool) *field.Error {
 		if c.Spec.NetworkCIDR != "" {
 			return field.Invalid(fieldSpec.Child("NetworkCIDR"), c.Spec.NetworkCIDR, "NetworkCIDR should not be set on DigitalOcean")
 		}
+	case kops.CloudProviderALI:
+		requiresSubnets = false
+		requiresSubnetCIDR = false
+		requiresNetworkCIDR = false
 	case kops.CloudProviderAWS:
 	case kops.CloudProviderVSphere:
 	case kops.CloudProviderOpenstack:
@@ -190,7 +196,8 @@ func ValidateCluster(c *kops.Cluster, strict bool) *field.Error {
 			return field.Invalid(fieldSpec.Child("NonMasqueradeCIDR"), nonMasqueradeCIDRString, "Cluster had an invalid NonMasqueradeCIDR")
 		}
 
-		if networkCIDR != nil && subnetsOverlap(nonMasqueradeCIDR, networkCIDR) && c.Spec.Networking != nil && c.Spec.Networking.AmazonVPC == nil {
+		if networkCIDR != nil && subnet.Overlap(nonMasqueradeCIDR, networkCIDR) && c.Spec.Networking != nil && c.Spec.Networking.AmazonVPC == nil && c.Spec.Networking.LyftVPC == nil {
+
 			return field.Invalid(fieldSpec.Child("NonMasqueradeCIDR"), nonMasqueradeCIDRString, fmt.Sprintf("NonMasqueradeCIDR %q cannot overlap with NetworkCIDR %q", nonMasqueradeCIDRString, c.Spec.NetworkCIDR))
 		}
 
@@ -220,7 +227,7 @@ func ValidateCluster(c *kops.Cluster, strict bool) *field.Error {
 				return field.Invalid(fieldSpec.Child("ServiceClusterIPRange"), serviceClusterIPRangeString, "Cluster had an invalid ServiceClusterIPRange")
 			}
 
-			if !isSubnet(nonMasqueradeCIDR, serviceClusterIPRange) {
+			if !subnet.BelongsTo(nonMasqueradeCIDR, serviceClusterIPRange) {
 				return field.Invalid(fieldSpec.Child("ServiceClusterIPRange"), serviceClusterIPRangeString, fmt.Sprintf("ServiceClusterIPRange %q must be a subnet of NonMasqueradeCIDR %q", serviceClusterIPRangeString, c.Spec.NonMasqueradeCIDR))
 			}
 
@@ -266,7 +273,7 @@ func ValidateCluster(c *kops.Cluster, strict bool) *field.Error {
 				return field.Invalid(fieldSpec.Child("KubeControllerManager", "ClusterCIDR"), clusterCIDRString, "Cluster had an invalid KubeControllerManager.ClusterCIDR")
 			}
 
-			if !isSubnet(nonMasqueradeCIDR, clusterCIDR) {
+			if !subnet.BelongsTo(nonMasqueradeCIDR, clusterCIDR) {
 				return field.Invalid(fieldSpec.Child("KubeControllerManager", "ClusterCIDR"), clusterCIDRString, fmt.Sprintf("KubeControllerManager.ClusterCIDR %q must be a subnet of NonMasqueradeCIDR %q", clusterCIDRString, c.Spec.NonMasqueradeCIDR))
 			}
 		}
@@ -332,6 +339,8 @@ func ValidateCluster(c *kops.Cluster, strict bool) *field.Error {
 			k8sCloudProvider = ""
 		case kops.CloudProviderOpenstack:
 			k8sCloudProvider = "openstack"
+		case kops.CloudProviderALI:
+			k8sCloudProvider = "alicloud"
 		default:
 			return field.Invalid(fieldSpec.Child("CloudProvider"), c.Spec.CloudProvider, "unknown cloudprovider")
 		}
@@ -428,13 +437,18 @@ func ValidateCluster(c *kops.Cluster, strict bool) *field.Error {
 
 	// KubeProxy
 	if c.Spec.KubeProxy != nil {
+		ipvsMode := "ipvs"
 		kubeProxyPath := fieldSpec.Child("KubeProxy")
-
 		master := c.Spec.KubeProxy.Master
-		// We no longer require the master to be set; nodeup can infer it automatically
-		//if strict && master == "" {
-		//      return field.Required(kubeProxyPath.Child("Master"), "")
-		//}
+
+		if kubernetesRelease.LT(semver.MustParse("1.8.0")) && c.Spec.KubeProxy.ProxyMode == ipvsMode {
+			return field.Invalid(kubeProxyPath.Child("proxyMode"), c.Spec.KubeProxy.ProxyMode, ipvsMode+" is not available pre v1.8.0")
+		}
+		for i, x := range c.Spec.KubeProxy.IPVSExcludeCIDRS {
+			if _, _, err := net.ParseCIDR(x); err != nil {
+				return field.Invalid(kubeProxyPath.Child("ipvsExcludeCIDRS").Index(i), x, "Invalid network CIDR")
+			}
+		}
 
 		if master != "" && !isValidAPIServersURL(master) {
 			return field.Invalid(kubeProxyPath.Child("Master"), master, "Not a valid APIServer URL")
@@ -555,11 +569,14 @@ func ValidateCluster(c *kops.Cluster, strict bool) *field.Error {
 	// Egress specification support
 	{
 		for i, s := range c.Spec.Subnets {
-			fieldSubnet := fieldSpec.Child("Subnets").Index(i)
-			if s.Egress != "" && !strings.HasPrefix(s.Egress, "nat-") && !strings.HasPrefix(s.Egress, "i-") {
-				return field.Invalid(fieldSubnet.Child("Egress"), s.Egress, "egress must be of type NAT Gateway or NAT EC2 Instance")
+			if s.Egress == "" {
+				continue
 			}
-			if s.Egress != "" && !(s.Type == "Private") {
+			fieldSubnet := fieldSpec.Child("Subnets").Index(i)
+			if !strings.HasPrefix(s.Egress, "nat-") && !strings.HasPrefix(s.Egress, "i-") && s.Egress != kops.EgressExternal {
+				return field.Invalid(fieldSubnet.Child("Egress"), s.Egress, "egress must be of type NAT Gateway or NAT EC2 Instance or 'External'")
+			}
+			if s.Egress != kops.EgressExternal && s.Type != "Private" {
 				return field.Invalid(fieldSubnet.Child("Egress"), s.Egress, "egress can only be specified for Private subnets")
 			}
 		}
@@ -591,8 +608,8 @@ func ValidateCluster(c *kops.Cluster, strict bool) *field.Error {
 		}
 	}
 
-	if c.Spec.Networking != nil && c.Spec.Networking.AmazonVPC != nil &&
-		(c.Spec.CloudProvider != "aws") {
+	if c.Spec.Networking != nil && (c.Spec.Networking.AmazonVPC != nil || c.Spec.Networking.LyftVPC != nil) &&
+		c.Spec.CloudProvider != "aws" {
 		return field.Invalid(fieldSpec.Child("Networking"), "amazon-vpc-routed-eni", "amazon-vpc-routed-eni networking is supported only in AWS")
 	}
 
@@ -603,6 +620,10 @@ func ValidateCluster(c *kops.Cluster, strict bool) *field.Error {
 
 		if c.Spec.Networking != nil && c.Spec.Networking.AmazonVPC != nil {
 			return field.Invalid(fieldSpec.Child("Networking"), "amazon-vpc-routed-eni", "amazon-vpc-routed-eni networking is not supported with kubernetes versions 1.6 or lower")
+		}
+
+		if c.Spec.Networking != nil && c.Spec.Networking.LyftVPC != nil {
+			return field.Invalid(fieldSpec.Child("Networking"), "cni-ipvlan-vpc-k8s", "cni-ipvlan-vpc-k8s networking is not supported with kubernetes versions 1.6 or lower")
 		}
 	}
 
@@ -618,14 +639,14 @@ func ValidateCluster(c *kops.Cluster, strict bool) *field.Error {
 	return nil
 }
 
-// validateSubnetCIDR is responsible for validating subnets are part of the CIRDs assigned to the cluster.
+// validateSubnetCIDR is responsible for validating subnets are part of the CIDRs assigned to the cluster.
 func validateSubnetCIDR(networkCIDR *net.IPNet, additionalNetworkCIDRs []*net.IPNet, subnetCIDR *net.IPNet) bool {
-	if isSubnet(networkCIDR, subnetCIDR) {
+	if subnet.BelongsTo(networkCIDR, subnetCIDR) {
 		return true
 	}
 
 	for _, additionalNetworkCIDR := range additionalNetworkCIDRs {
-		if isSubnet(additionalNetworkCIDR, subnetCIDR) {
+		if subnet.BelongsTo(additionalNetworkCIDR, subnetCIDR) {
 			return true
 		}
 	}
@@ -789,6 +810,10 @@ func DeepValidate(c *kops.Cluster, groups []*kops.InstanceGroup, strict bool) er
 			errs := awsValidateInstanceGroup(g)
 			if len(errs) != 0 {
 				return errs[0]
+			}
+		default:
+			if len(g.Spec.Volumes) > 0 {
+				return errors.New("instancegroup volumes are only available with aws at present")
 			}
 		}
 	}

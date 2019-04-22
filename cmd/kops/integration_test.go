@@ -57,6 +57,11 @@ func TestMinimal(t *testing.T) {
 	runTestAWS(t, "minimal.example.com", "minimal", "v1alpha2", false, 1, true, nil)
 }
 
+// TestRestrictAccess runs the test on a simple SG configuration, similar to kops create cluster minimal.example.com --ssh-access=$(IPS) --admin-access=$(IPS) --master-count=3
+func TestRestrictAccess(t *testing.T) {
+	runTestAWS(t, "restrictaccess.example.com", "restrict_access", "v1alpha2", false, 1, true, nil)
+}
+
 // TestHA runs the test on a simple HA configuration, similar to kops create cluster minimal.example.com --zones us-west-1a,us-west-1b,us-west-1c --master-count=3
 func TestHA(t *testing.T) {
 	runTestAWS(t, "ha.example.com", "ha", "v1alpha1", false, 3, true, nil)
@@ -136,6 +141,11 @@ func TestPrivateKopeio(t *testing.T) {
 	runTestAWS(t, "privatekopeio.example.com", "privatekopeio", "v1alpha2", true, 1, true, nil)
 }
 
+// TestUnmanaged is a test where all the subnets opt-out of route management
+func TestUnmanaged(t *testing.T) {
+	runTestAWS(t, "unmanaged.example.com", "unmanaged", "v1alpha2", true, 1, true, nil)
+}
+
 // TestPrivateSharedSubnet runs the test on a configuration with private topology & shared subnets
 func TestPrivateSharedSubnet(t *testing.T) {
 	runTestAWS(t, "private-shared-subnet.example.com", "private-shared-subnet", "v1alpha2", true, 1, true, nil)
@@ -169,6 +179,7 @@ func TestExistingIAM(t *testing.T) {
 
 // TestAdditionalCIDR runs the test on a configuration with a shared VPC
 func TestAdditionalCIDR(t *testing.T) {
+	runTestAWS(t, "additionalcidr.example.com", "additional_cidr", "v1alpha3", false, 3, true, nil)
 	runTestCloudformation(t, "additionalcidr.example.com", "additional_cidr", "v1alpha2", false, nil)
 }
 

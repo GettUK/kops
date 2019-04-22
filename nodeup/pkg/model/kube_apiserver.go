@@ -30,7 +30,7 @@ import (
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
 	"k8s.io/kops/util/pkg/exec"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -81,7 +81,7 @@ func (b *KubeAPIServerBuilder) Build(c *fi.ModelBuilderContext) error {
 
 		manifest, err := k8scodecs.ToVersionedYaml(pod)
 		if err != nil {
-			return fmt.Errorf("error marshalling manifest to yaml: %v", err)
+			return fmt.Errorf("error marshaling manifest to yaml: %v", err)
 		}
 
 		c.AddTask(&nodetasks.File{
@@ -146,7 +146,7 @@ func (b *KubeAPIServerBuilder) writeAuthenticationConfig(c *fi.ModelBuilderConte
 
 		manifest, err := kops.ToRawYaml(config)
 		if err != nil {
-			return fmt.Errorf("error marshalling authentication config to yaml: %v", err)
+			return fmt.Errorf("error marshaling authentication config to yaml: %v", err)
 		}
 
 		c.AddTask(&nodetasks.File{
@@ -200,7 +200,7 @@ func (b *KubeAPIServerBuilder) writeAuthenticationConfig(c *fi.ModelBuilderConte
 
 			manifest, err := kops.ToRawYaml(config)
 			if err != nil {
-				return fmt.Errorf("error marshalling authentication config to yaml: %v", err)
+				return fmt.Errorf("error marshaling authentication config to yaml: %v", err)
 			}
 
 			c.AddTask(&nodetasks.File{
@@ -283,10 +283,20 @@ func (b *KubeAPIServerBuilder) buildPod() (*v1.Pod, error) {
 	kubeAPIServer.ClientCAFile = filepath.Join(b.PathSrvKubernetes(), "ca.crt")
 	kubeAPIServer.TLSCertFile = filepath.Join(b.PathSrvKubernetes(), "server.cert")
 	kubeAPIServer.TLSPrivateKeyFile = filepath.Join(b.PathSrvKubernetes(), "server.key")
-	kubeAPIServer.BasicAuthFile = filepath.Join(b.PathSrvKubernetes(), "basic_auth.csv")
 	kubeAPIServer.TokenAuthFile = filepath.Join(b.PathSrvKubernetes(), "known_tokens.csv")
 
-	if b.UseEtcdTLS() {
+	if !kubeAPIServer.DisableBasicAuth {
+		kubeAPIServer.BasicAuthFile = filepath.Join(b.PathSrvKubernetes(), "basic_auth.csv")
+	}
+
+	if b.UseEtcdManager() && b.UseEtcdTLS() {
+		basedir := "/etc/kubernetes/pki/kube-apiserver"
+		kubeAPIServer.EtcdCAFile = filepath.Join(basedir, "etcd-ca.crt")
+		kubeAPIServer.EtcdCertFile = filepath.Join(basedir, "etcd-client.crt")
+		kubeAPIServer.EtcdKeyFile = filepath.Join(basedir, "etcd-client.key")
+		kubeAPIServer.EtcdServers = []string{"https://127.0.0.1:4001"}
+		kubeAPIServer.EtcdServersOverrides = []string{"/events#https://127.0.0.1:4002"}
+	} else if b.UseEtcdTLS() {
 		kubeAPIServer.EtcdCAFile = filepath.Join(b.PathSrvKubernetes(), "ca.crt")
 		kubeAPIServer.EtcdCertFile = filepath.Join(b.PathSrvKubernetes(), "etcd-client.pem")
 		kubeAPIServer.EtcdKeyFile = filepath.Join(b.PathSrvKubernetes(), "etcd-client-key.pem")
@@ -377,6 +387,11 @@ func (b *KubeAPIServerBuilder) buildPod() (*v1.Pod, error) {
 		probeAction.Scheme = v1.URISchemeHTTPS
 	}
 
+	requestCPU := resource.MustParse("150m")
+	if b.Cluster.Spec.KubeAPIServer.CPURequest != "" {
+		requestCPU = resource.MustParse(b.Cluster.Spec.KubeAPIServer.CPURequest)
+	}
+
 	container := &v1.Container{
 		Name:  "kube-apiserver",
 		Image: b.Cluster.Spec.KubeAPIServer.Image,
@@ -389,7 +404,7 @@ func (b *KubeAPIServerBuilder) buildPod() (*v1.Pod, error) {
 			Handler: v1.Handler{
 				HTTPGet: probeAction,
 			},
-			InitialDelaySeconds: 15,
+			InitialDelaySeconds: 45,
 			TimeoutSeconds:      15,
 		},
 		Ports: []v1.ContainerPort{
@@ -406,7 +421,7 @@ func (b *KubeAPIServerBuilder) buildPod() (*v1.Pod, error) {
 		},
 		Resources: v1.ResourceRequirements{
 			Requests: v1.ResourceList{
-				v1.ResourceCPU: resource.MustParse("150m"),
+				v1.ResourceCPU: requestCPU,
 			},
 		},
 	}
@@ -417,6 +432,19 @@ func (b *KubeAPIServerBuilder) buildPod() (*v1.Pod, error) {
 	}
 
 	addHostPathMapping(pod, container, "logfile", "/var/log/kube-apiserver.log").ReadOnly = false
+
+	if b.UseEtcdManager() {
+		volumeType := v1.HostPathDirectoryOrCreate
+		addHostPathVolume(pod, container,
+			v1.HostPathVolumeSource{
+				Path: "/etc/kubernetes/pki/kube-apiserver",
+				Type: &volumeType,
+			},
+			v1.VolumeMount{
+				Name:     "pki",
+				ReadOnly: false,
+			})
+	}
 
 	// Add cloud config file if needed
 	if b.Cluster.Spec.CloudConfig != nil {

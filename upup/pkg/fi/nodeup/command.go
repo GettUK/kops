@@ -17,6 +17,7 @@ limitations under the License.
 package nodeup
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,9 +28,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/glog"
-
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/kops/nodeup/pkg/distros"
 	"k8s.io/kops/nodeup/pkg/model"
 	api "k8s.io/kops/pkg/apis/kops"
@@ -43,12 +41,20 @@ import (
 	"k8s.io/kops/upup/pkg/fi/secrets"
 	"k8s.io/kops/upup/pkg/fi/utils"
 	"k8s.io/kops/util/pkg/vfs"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/ec2metadata"
+	"github.com/aws/aws-sdk-go/aws/request"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/golang/glog"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // MaxTaskDuration is the amount of time to keep trying for; we retry for a long time - there is not really any great fallback
 const MaxTaskDuration = 365 * 24 * time.Hour
 
-// NodeUpCommand the configiruation for nodeup
+// NodeUpCommand is the configuration for nodeup
 type NodeUpCommand struct {
 	CacheDir       string
 	ConfigLocation string
@@ -219,6 +225,7 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 	loader := NewLoader(c.config, c.cluster, assetStore, nodeTags)
 	loader.Builders = append(loader.Builders, &model.DirectoryBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.UpdateServiceBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.VolumesBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.DockerBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.ProtokubeBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.CloudConfigBuilder{NodeupModelContext: modelContext})
@@ -238,6 +245,7 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 	loader.Builders = append(loader.Builders, &model.KubeAPIServerBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.KubeControllerManagerBuilder{NodeupModelContext: modelContext})
 	loader.Builders = append(loader.Builders, &model.KubeSchedulerBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.EtcdManagerTLSBuilder{NodeupModelContext: modelContext})
 	if c.cluster.Spec.Networking.Kuberouter == nil {
 		loader.Builders = append(loader.Builders, &model.KubeProxyBuilder{NodeupModelContext: modelContext})
 	} else {
@@ -247,6 +255,37 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 		loader.Builders = append(loader.Builders, &model.EtcdTLSBuilder{NodeupModelContext: modelContext})
 	}
 
+	if c.cluster.Spec.Networking.LyftVPC != nil {
+
+		loader.TemplateFunctions["SubnetTags"] = func() (string, error) {
+			tags := map[string]string{
+				"Type": "pod",
+			}
+			if len(c.cluster.Spec.Networking.LyftVPC.SubnetTags) > 0 {
+				tags = c.cluster.Spec.Networking.LyftVPC.SubnetTags
+			}
+
+			bytes, err := json.Marshal(tags)
+			if err != nil {
+				return "", err
+			}
+			return string(bytes), nil
+		}
+
+		loader.TemplateFunctions["NodeSecurityGroups"] = func() (string, error) {
+			// use the same security groups as the node
+			ids, err := evaluateSecurityGroups(c.cluster.Spec.NetworkID)
+			if err != nil {
+				return "", err
+			}
+			bytes, err := json.Marshal(ids)
+			if err != nil {
+				return "", err
+			}
+			return string(bytes), nil
+		}
+	}
+
 	taskMap, err := loader.Build(c.ModelDir)
 	if err != nil {
 		return fmt.Errorf("error building loader: %v", err)
@@ -254,14 +293,14 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 
 	for i, image := range c.config.Images {
 		taskMap["LoadImage."+strconv.Itoa(i)] = &nodetasks.LoadImageTask{
-			Source: image.Source,
-			Hash:   image.Hash,
+			Sources: image.Sources,
+			Hash:    image.Hash,
 		}
 	}
 	if c.config.ProtokubeImage != nil {
 		taskMap["LoadImage.protokube"] = &nodetasks.LoadImageTask{
-			Source: c.config.ProtokubeImage.Source,
-			Hash:   c.config.ProtokubeImage.Hash,
+			Sources: c.config.ProtokubeImage.Sources,
+			Hash:    c.config.ProtokubeImage.Hash,
 		}
 	}
 
@@ -343,6 +382,57 @@ func evaluateSpec(c *api.Cluster) error {
 	return nil
 }
 
+func evaluateSecurityGroups(vpcId string) ([]string, error) {
+	config := aws.NewConfig()
+	config = config.WithCredentialsChainVerboseErrors(true)
+
+	s, err := session.NewSession(config)
+	if err != nil {
+		return nil, fmt.Errorf("error starting new AWS session: %v", err)
+	}
+	s.Handlers.Send.PushFront(func(r *request.Request) {
+		// Log requests
+		glog.V(4).Infof("AWS API Request: %s/%s", r.ClientInfo.ServiceName, r.Operation.Name)
+	})
+
+	metadata := ec2metadata.New(s, config)
+
+	region, err := metadata.Region()
+	if err != nil {
+		return nil, fmt.Errorf("error querying ec2 metadata service (for az/region): %v", err)
+	}
+
+	sgNames, err := metadata.GetMetadata("security-groups")
+	if err != nil {
+		return nil, fmt.Errorf("error querying ec2 metadata service (for security-groups): %v", err)
+	}
+	svc := ec2.New(s, config.WithRegion(region))
+
+	result, err := svc.DescribeSecurityGroups(&ec2.DescribeSecurityGroupsInput{
+		Filters: []*ec2.Filter{
+			{
+				Name:   aws.String("group-name"),
+				Values: aws.StringSlice(strings.Fields(sgNames)),
+			},
+			{
+				Name:   aws.String("vpc-id"),
+				Values: []*string{aws.String(vpcId)},
+			},
+		},
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("error looking up instance security group ids: %v", err)
+	}
+	var sgIds []string
+	for _, group := range result.SecurityGroups {
+		sgIds = append(sgIds, *group.GroupId)
+	}
+
+	return sgIds, nil
+
+}
+
 func evaluateHostnameOverride(hostnameOverride string) (string, error) {
 	if hostnameOverride == "" || hostnameOverride == "@hostname" {
 		return "", nil
@@ -364,12 +454,12 @@ func evaluateHostnameOverride(hostnameOverride string) (string, error) {
 		if len(domains) == 0 {
 			glog.Warningf("Local hostname from AWS metadata service was empty")
 			return "", nil
-		} else {
-			domain := domains[0]
-			glog.Infof("Using hostname from AWS metadata service: %s", domain)
-
-			return domain, nil
 		}
+
+		domain := domains[0]
+		glog.Infof("Using hostname from AWS metadata service: %s", domain)
+
+		return domain, nil
 	}
 
 	if k == "@digitalocean" {
@@ -406,12 +496,12 @@ func evaluateBindAddress(bindAddress string) (string, error) {
 		if len(ips) == 0 {
 			glog.Warningf("Local IP from AWS metadata service was empty")
 			return "", nil
-		} else {
-			ip := ips[0]
-			glog.Infof("Using IP from AWS metadata service: %s", ip)
-
-			return ip, nil
 		}
+
+		ip := ips[0]
+		glog.Infof("Using IP from AWS metadata service: %s", ip)
+
+		return ip, nil
 	}
 
 	if net.ParseIP(bindAddress) == nil {

@@ -41,13 +41,15 @@ import (
 	"github.com/aws/aws-sdk-go/service/route53/route53iface"
 	"github.com/golang/glog"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
 	dnsproviderroute53 "k8s.io/kops/dnsprovider/pkg/dnsprovider/providers/aws/route53"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/model"
 	"k8s.io/kops/pkg/cloudinstances"
+	"k8s.io/kops/pkg/featureflag"
+	"k8s.io/kops/pkg/resources/spotinst"
 	"k8s.io/kops/upup/pkg/fi"
 	k8s_aws "k8s.io/kubernetes/pkg/cloudprovider/providers/aws"
 )
@@ -102,6 +104,7 @@ type AWSCloud interface {
 	ELBV2() elbv2iface.ELBV2API
 	Autoscaling() autoscalingiface.AutoScalingAPI
 	Route53() route53iface.Route53API
+	Spotinst() spotinst.Service
 
 	// TODO: Document and rationalize these tags/filters methods
 	AddTags(name *string, tags map[string]string)
@@ -120,6 +123,8 @@ type AWSCloud interface {
 
 	// CreateELBTags will add tags to the specified loadBalancer, retrying up to MaxCreateTagsAttempts times if it hits an eventual-consistency type error
 	CreateELBTags(loadBalancerName string, tags map[string]string) error
+	// RemoveELBTags will remove tags from the specified loadBalancer, retrying up to MaxCreateTagsAttempts times if it hits an eventual-consistency type error
+	RemoveELBTags(loadBalancerName string, tags map[string]string) error
 
 	// DeleteTags will delete tags from the specified resource, retrying up to MaxCreateTagsAttempts times if it hits an eventual-consistency type error
 	DeleteTags(id string, tags map[string]string) error
@@ -157,6 +162,7 @@ type awsCloudImplementation struct {
 	elbv2       *elbv2.ELBV2
 	autoscaling *autoscaling.AutoScaling
 	route53     *route53.Route53
+	spotinst    spotinst.Service
 
 	region string
 
@@ -265,6 +271,13 @@ func NewAWSCloud(region string, tags map[string]string) (AWSCloud, error) {
 		c.route53.Handlers.Send.PushFront(requestLogger)
 		c.addHandlers(region, &c.route53.Handlers)
 
+		if featureflag.Spotinst.Enabled() {
+			c.spotinst, err = spotinst.NewService(kops.CloudProviderAWS)
+			if err != nil {
+				return c, err
+			}
+		}
+
 		awsCloudInstances[region] = c
 		raw = c
 	}
@@ -325,6 +338,10 @@ func NewEC2Filter(name string, values ...string) *ec2.Filter {
 
 // DeleteGroup deletes an aws autoscaling group
 func (c *awsCloudImplementation) DeleteGroup(g *cloudinstances.CloudInstanceGroup) error {
+	if c.spotinst != nil {
+		return spotinst.DeleteGroup(c.spotinst, g)
+	}
+
 	return deleteGroup(c, g)
 }
 
@@ -366,6 +383,10 @@ func deleteGroup(c AWSCloud, g *cloudinstances.CloudInstanceGroup) error {
 
 // DeleteInstance deletes an aws instance
 func (c *awsCloudImplementation) DeleteInstance(i *cloudinstances.CloudInstanceGroupMember) error {
+	if c.spotinst != nil {
+		return spotinst.DeleteInstance(c.spotinst, i)
+	}
+
 	return deleteInstance(c, i)
 }
 
@@ -393,6 +414,11 @@ func deleteInstance(c AWSCloud, i *cloudinstances.CloudInstanceGroupMember) erro
 
 // GetCloudGroups returns a groups of instances that back a kops instance groups
 func (c *awsCloudImplementation) GetCloudGroups(cluster *kops.Cluster, instancegroups []*kops.InstanceGroup, warnUnmatched bool, nodes []v1.Node) (map[string]*cloudinstances.CloudInstanceGroup, error) {
+	if c.spotinst != nil {
+		return spotinst.GetCloudGroups(c.spotinst, cluster,
+			instancegroups, warnUnmatched, nodes)
+	}
+
 	return getCloudGroups(c, cluster, instancegroups, warnUnmatched, nodes)
 }
 
@@ -467,31 +493,42 @@ func FindAutoscalingGroups(c AWSCloud, tags map[string]string) ([]*autoscaling.G
 	}
 
 	if len(asgNames) != 0 {
-		request := &autoscaling.DescribeAutoScalingGroupsInput{
-			AutoScalingGroupNames: asgNames,
-		}
-		err := c.Autoscaling().DescribeAutoScalingGroupsPages(request, func(p *autoscaling.DescribeAutoScalingGroupsOutput, lastPage bool) bool {
-			for _, asg := range p.AutoScalingGroups {
-				if !matchesAsgTags(tags, asg.Tags) {
-					// We used an inexact filter above
-					continue
-				}
-				// Check for "Delete in progress" (the only use of .Status)
-				if asg.Status != nil {
-					glog.Warningf("Skipping ASG %v (which matches tags): %v", *asg.AutoScalingGroupARN, *asg.Status)
-					continue
-				}
-				asgs = append(asgs, asg)
+		for i := 0; i < len(asgNames); i += 50 {
+			batch := asgNames[i:minInt(i+50, len(asgNames))]
+			request := &autoscaling.DescribeAutoScalingGroupsInput{
+				AutoScalingGroupNames: batch,
 			}
-			return true
-		})
-		if err != nil {
-			return nil, fmt.Errorf("error listing autoscaling groups: %v", err)
+			err := c.Autoscaling().DescribeAutoScalingGroupsPages(request, func(p *autoscaling.DescribeAutoScalingGroupsOutput, lastPage bool) bool {
+				for _, asg := range p.AutoScalingGroups {
+					if !matchesAsgTags(tags, asg.Tags) {
+						// We used an inexact filter above
+						continue
+					}
+					// Check for "Delete in progress" (the only use of .Status)
+					if asg.Status != nil {
+						glog.Warningf("Skipping ASG %v (which matches tags): %v", *asg.AutoScalingGroupARN, *asg.Status)
+						continue
+					}
+					asgs = append(asgs, asg)
+				}
+				return true
+			})
+			if err != nil {
+				return nil, fmt.Errorf("error listing autoscaling groups: %v", err)
+			}
 		}
 
 	}
 
 	return asgs, nil
+}
+
+// Returns the minimum of two ints
+func minInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // matchesAsgTags is used to filter an asg by tags
@@ -513,8 +550,66 @@ func matchesAsgTags(tags map[string]string, actual []*autoscaling.TagDescription
 	return true
 }
 
+// findAutoscalingGroupLaunchConfiguration is responsible for finding the launch - which could be a launchconfiguration, a template or a mixed instance policy template
+func findAutoscalingGroupLaunchConfiguration(g *autoscaling.Group) (string, error) {
+	name := aws.StringValue(g.LaunchConfigurationName)
+	if name != "" {
+		return name, nil
+	}
+
+	// @check the launch template then
+	if g.LaunchTemplate != nil {
+		name = aws.StringValue(g.LaunchTemplate.LaunchTemplateName)
+		version := aws.StringValue(g.LaunchTemplate.Version)
+		if name != "" {
+			launchTemplate := name + ":" + version
+			return launchTemplate, nil
+		}
+	}
+
+	// @check: ok, lets check the mixed instance policy
+	if g.MixedInstancesPolicy != nil {
+		if g.MixedInstancesPolicy.LaunchTemplate != nil {
+			if g.MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification != nil {
+				// honestly!!
+				name = aws.StringValue(g.MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateName)
+				version := aws.StringValue(g.MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version)
+				if name != "" {
+					launchTemplate := name + ":" + version
+					return launchTemplate, nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("error finding launch template or configuration for autoscaling group: %s", aws.StringValue(g.AutoScalingGroupName))
+}
+
+// findInstanceLaunchConfiguration is responsible for discoverying the launch configuration for an instance
+func findInstanceLaunchConfiguration(i *autoscaling.Instance) string {
+	name := aws.StringValue(i.LaunchConfigurationName)
+	if name != "" {
+		return name
+	}
+
+	// else we need to check the launch template
+	if i.LaunchTemplate != nil {
+		name = aws.StringValue(i.LaunchTemplate.LaunchTemplateName)
+		version := aws.StringValue(i.LaunchTemplate.Version)
+		if name != "" {
+			launchTemplate := name + ":" + version
+			return launchTemplate
+		}
+	}
+
+	return ""
+}
+
 func awsBuildCloudInstanceGroup(c AWSCloud, ig *kops.InstanceGroup, g *autoscaling.Group, nodeMap map[string]*v1.Node) (*cloudinstances.CloudInstanceGroup, error) {
-	newLaunchConfigName := aws.StringValue(g.LaunchConfigurationName)
+	newConfigName, err := findAutoscalingGroupLaunchConfiguration(g)
+	if err != nil {
+		return nil, err
+	}
 
 	cg := &cloudinstances.CloudInstanceGroup{
 		HumanName:     aws.StringValue(g.AutoScalingGroupName),
@@ -525,13 +620,19 @@ func awsBuildCloudInstanceGroup(c AWSCloud, ig *kops.InstanceGroup, g *autoscali
 	}
 
 	for _, i := range g.Instances {
-		instanceId := aws.StringValue(i.InstanceId)
-		if instanceId == "" {
-			glog.Warningf("ignoring instance with no instance id: %s", i)
+		id := aws.StringValue(i.InstanceId)
+		if id == "" {
+			glog.Warningf("ignoring instance with no instance id: %s in autoscaling group: %s", id, cg.HumanName)
 			continue
 		}
-		err := cg.NewCloudInstanceGroupMember(instanceId, newLaunchConfigName, aws.StringValue(i.LaunchConfigurationName), nodeMap)
-		if err != nil {
+		// @step: check if the instance is terminating
+		if aws.StringValue(i.LifecycleState) == autoscaling.LifecycleStateTerminating {
+			glog.Warningf("ignoring instance  as it is terminating: %s in autoscaling group: %s", id, cg.HumanName)
+			continue
+		}
+		currentConfigName := findInstanceLaunchConfiguration(i)
+
+		if err := cg.NewCloudInstanceGroupMember(id, newConfigName, currentConfigName, nodeMap); err != nil {
 			return nil, fmt.Errorf("error creating cloud instance group member: %v", err)
 		}
 	}
@@ -811,6 +912,39 @@ func createELBTags(c AWSCloud, loadBalancerName string, tags map[string]string) 
 		}
 
 		_, err := c.ELB().AddTags(request)
+		if err != nil {
+			return fmt.Errorf("error creating tags on %v: %v", loadBalancerName, err)
+		}
+
+		return nil
+	}
+}
+
+// RemoveELBTags will remove tags to the specified loadBalancer, retrying up to MaxCreateTagsAttempts times if it hits an eventual-consistency type error
+func (c *awsCloudImplementation) RemoveELBTags(loadBalancerName string, tags map[string]string) error {
+	return removeELBTags(c, loadBalancerName, tags)
+}
+
+func removeELBTags(c AWSCloud, loadBalancerName string, tags map[string]string) error {
+	if len(tags) == 0 {
+		return nil
+	}
+
+	elbTagKeysOnly := []*elb.TagKeyOnly{}
+	for k := range tags {
+		elbTagKeysOnly = append(elbTagKeysOnly, &elb.TagKeyOnly{Key: aws.String(k)})
+	}
+
+	attempt := 0
+	for {
+		attempt++
+
+		request := &elb.RemoveTagsInput{
+			Tags:              elbTagKeysOnly,
+			LoadBalancerNames: []*string{&loadBalancerName},
+		}
+
+		_, err := c.ELB().RemoveTags(request)
 		if err != nil {
 			return fmt.Errorf("error creating tags on %v: %v", loadBalancerName, err)
 		}
@@ -1138,6 +1272,10 @@ func (c *awsCloudImplementation) Autoscaling() autoscalingiface.AutoScalingAPI {
 
 func (c *awsCloudImplementation) Route53() route53iface.Route53API {
 	return c.route53
+}
+
+func (c *awsCloudImplementation) Spotinst() spotinst.Service {
+	return c.spotinst
 }
 
 func (c *awsCloudImplementation) FindVPCInfo(vpcID string) (*fi.VPCInfo, error) {
