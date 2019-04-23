@@ -234,6 +234,8 @@ func (e *AutoscalingGroup) CheckChanges(a, ex, changes *AutoscalingGroup) error 
 			return fi.RequiredField("Name")
 		}
 	}
+	return nil
+}
 
 func (e *AutoscalingGroup) buildTags(cloud fi.Cloud) map[string]string {
 	tags := make(map[string]string)
